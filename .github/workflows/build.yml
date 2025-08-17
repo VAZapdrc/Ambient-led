@@ -112,22 +112,32 @@ jobs:
         shell: bash
         run: |
           set -e
-          # ищем файл build.gradle(.kts), где есть com.android.application
+          # ищем build.gradle(.kts) с com.android.application
           CAND="$(grep -Rsl --include=build.gradle --include=build.gradle.kts -E 'com\.android\.application' "$PROJECT_DIR" || true | head -n1)"
+          # типичный модуль app — подстраховка
           if [ -z "$CAND" ] && [ -d "$PROJECT_DIR/app" ]; then
-            # типичный модуль app
             if [ -f "$PROJECT_DIR/app/build.gradle" ] || [ -f "$PROJECT_DIR/app/build.gradle.kts" ]; then
               CAND="$PROJECT_DIR/app/build.gradle"
             fi
           fi
           if [ -z "$CAND" ]; then
-            echo "Не нашли модуль приложения"; ls -R "$PROJECT_DIR"; exit 1
+            echo "Не нашли модуль приложения"
+            ls -R "$PROJECT_DIR"
+            exit 1
           fi
+
           APP_DIR="$(dirname "$CAND")"
           echo "APP_DIR=$APP_DIR" >> "$GITHUB_ENV"
 
-          # вычисляем имя модуля для задачи Gradle (в виде :module:submodule)
-          REL="$(python3 - <<'PY'
+          # вычисляем имя для Gradle-задачи в формате :module:submodule (без python)
+          if [ "$APP_DIR" = "$PROJECT_DIR" ]; then
+            REL=""
+          else
+            REL=":${APP_DIR#${PROJECT_DIR}/}"
+            REL="${REL//\//:}"
+          fi
+          echo "GRADLE_MOD=$REL" >> "$GITHUB_ENV"
+          echo "Найден модуль: $REL в $APP_DIR"
 import os,sys
 project=os.environ["PROJECT_DIR"]
 app=os.environ["APP_DIR"]
