@@ -40,52 +40,53 @@ jobs:
         run: |
           chmod +x "${{ steps.unzip.outputs.root }}/gradlew" || true
 
-      - name: Patch repositories (pluginManagement + allprojects)
+      - name: Patch repositories if missing
         shell: bash
         run: |
           set -e
           ROOT="${{ steps.unzip.outputs.root }}"
           FILE=""
-          [ -f "$ROOT/settings.gradle" ] && FILE="$ROOT/settings.gradle"
-          [ -f "$ROOT/settings.gradle.kts" ] && FILE="$ROOT/settings.gradle.kts"
+          if [ -f "$ROOT/settings.gradle" ]; then FILE="$ROOT/settings.gradle"; fi
+          if [ -f "$ROOT/settings.gradle.kts" ]; then FILE="$ROOT/settings.gradle.kts"; fi
           if [ -z "$FILE" ]; then
             echo "settings.gradle(.kts) not found under $ROOT"
             exit 1
           fi
 
-          # если pluginManagement нет — добавим в начало файла
+          # Добавим pluginManagement/DRM в settings.gradle*, если их нет
           if ! grep -q "pluginManagement" "$FILE"; then
-            printf "%s\n" \
-"pluginManagement {" \
-"    repositories {" \
-"        google()" \
-"        mavenCentral()" \
-"        gradlePluginPortal()" \
-"    }" \
-"}" \
-"" \
-"dependencyResolutionManagement {" \
-"    repositoriesMode.set(RepositoriesMode.FAIL_ON_PROJECT_REPOS)" \
-"    repositories {" \
-"        google()" \
-"        mavenCentral()" \
-"    }" \
-"}" \
-            | cat - "$FILE" > "$FILE.new" && mv "$FILE.new" "$FILE"
+            TMP="$(mktemp)"
+            cat > "$TMP" <<'EOF'
+pluginManagement {
+    repositories {
+        google()
+        mavenCentral()
+        gradlePluginPortal()
+    }
+}
+dependencyResolutionManagement {
+    repositoriesMode.set(RepositoriesMode.FAIL_ON_PROJECT_REPOS)
+    repositories {
+        google()
+        mavenCentral()
+    }
+}
+EOF
+            cat "$TMP" "$FILE" > "$FILE.new" && mv "$FILE.new" "$FILE"
           fi
 
-          # если в корневом build.gradle* нет allprojects{} — добавим
+          # Добавим allprojects{ repositories{ google(); mavenCentral() } } в корневой build.gradle*, если отсутствует
           for F in "$ROOT/build.gradle" "$ROOT/build.gradle.kts"; do
             if [ -f "$F" ] && ! grep -q "allprojects {" "$F"; then
-              printf "%s\n" \
-"" \
-"allprojects {" \
-"    repositories {" \
-"        google()" \
-"        mavenCentral()" \
-"    }" \
-"}" \
-              >> "$F"
+              cat >> "$F" <<'EOF'
+
+allprojects {
+    repositories {
+        google()
+        mavenCentral()
+    }
+}
+EOF
             fi
           done
 
@@ -99,7 +100,7 @@ jobs:
       - name: Set up Android SDK
         uses: android-actions/setup-android@v3
 
-      # если в проекте нет gradlew — сгенерируем враппер
+      # Если в проекте нет gradlew — сгенерируем враппер
       - name: Generate Gradle wrapper if missing
         if: ${{ hashFiles(format('{0}/gradlew', steps.unzip.outputs.root)) == '' }}
         uses: gradle/gradle-build-action@v2
