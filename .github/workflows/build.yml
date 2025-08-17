@@ -41,14 +41,60 @@ jobs:
           cd _src
           FILE=$(find . -maxdepth 4 -type f \( -name settings.gradle -o -name settings.gradle.kts \) -print -quit)
           if [ -z "$FILE" ]; then
-            echo "settings.gradle not found inside ZIP" >&2
-            ls -la
-            exit 1
+            # создадим минимальный settings.gradle, если его нет
+            echo "rootProject.name = 'app'" > settings.gradle
+            FILE="settings.gradle"
           fi
           ROOT=$(dirname "$FILE")
           echo "root=$ROOT" >> $GITHUB_OUTPUT
           echo "PROJECT_DIR=$ROOT" >> $GITHUB_ENV
           echo "Gradle root: $ROOT"
+
+      - name: Patch repositories (pluginManagement + allprojects)
+        run: |
+          set -e
+          ROOT="_src/${{ steps.locate.outputs.root }}"
+          # settings.gradle(.kts)
+          FILE=""
+          if [ -f "$ROOT/settings.gradle" ]; then FILE="$ROOT/settings.gradle"; fi
+          if [ -f "$ROOT/settings.gradle.kts" ]; then FILE="$ROOT/settings.gradle.kts"; fi
+          if [ -z "$FILE" ]; then
+            FILE="$ROOT/settings.gradle"
+            echo "rootProject.name = 'app'" > "$FILE"
+          fi
+          if ! grep -q "pluginManagement" "$FILE"; then
+            cat <<'EOF' > /tmp/pm.txt
+pluginManagement {
+    repositories {
+        google()
+        mavenCentral()
+        gradlePluginPortal()
+    }
+}
+dependencyResolutionManagement {
+    repositoriesMode.set(RepositoriesMode.FAIL_ON_PROJECT_REPOS)
+    repositories {
+        google()
+        mavenCentral()
+    }
+}
+EOF
+            cat /tmp/pm.txt "$FILE" > "$FILE.new" && mv "$FILE.new" "$FILE"
+          fi
+          # На всякий случай добавим репозитории для всех подпроектов (устаревший стиль)
+          for F in "$ROOT/build.gradle" "$ROOT/build.gradle.kts"; do
+            if [ -f "$F" ] && ! grep -q "allprojects" "$F"; then
+              cat <<'EOF' >> "$F"
+
+allprojects {
+    repositories {
+        google()
+        mavenCentral()
+    }
+}
+EOF
+            fi
+          done
 
       - name: Set up JDK 17
         uses: actions/setup-java@v4
@@ -56,25 +102,21 @@ jobs:
           distribution: temurin
           java-version: 17
 
-      - name: Install Android SDK tools
-        uses: android-actions/setup-android@v3
-
-      - name: Accept licenses
-        run: yes | sdkmanager --licenses
-
-      - name: Make gradlew executable (if exists)
+      - name: Ensure Gradle wrapper 8.2.1
         run: |
+          set -e
           cd _src/${PROJECT_DIR}
-          if [ -f gradlew ]; then chmod +x gradlew; fi
-
-      - name: Assemble debug
-        run: |
-          cd _src/${PROJECT_DIR}
-          if [ -f gradlew ]; then
-            ./gradlew --no-daemon assembleDebug
-          else
-            gradle --no-daemon assembleDebug
+          if [ ! -f gradlew ]; then
+            # создаём wrapper нужной версии, совместимой с AGP 8.2.2
+            gradle wrapper --gradle-version 8.2.1
           fi
+          chmod +x gradlew
+
+      - name: Assemble debug (via wrapper)
+        run: |
+          set -e
+          cd _src/${PROJECT_DIR}
+          ./gradlew --no-daemon assembleDebug
 
       - name: Upload APK
         uses: actions/upload-artifact@v4
