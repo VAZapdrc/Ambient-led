@@ -1,120 +1,43 @@
-name: Build APK from ZIP
-
-on:
-  push:
-    branches: [ main ]
-    paths:
-      - "*.zip"
-      - ".github/workflows/build.yml"
-  workflow_dispatch:
-
-jobs:
-  build:
-    runs-on: ubuntu-latest
-
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Find ZIP in repo root
-        id: z
-        run: |
-          set -e
-          shopt -s nullglob
-          files=(*.zip)
-          if [ ${#files[@]} -eq 0 ]; then
-            echo "No ZIP found in repository root." >&2
-            exit 1
-          fi
-          echo "zip=${files[0]}" >> $GITHUB_OUTPUT
-          echo "Using ZIP: ${files[0]}"
-
-      - name: Unzip
-        run: |
-          rm -rf _src
-          mkdir _src
-          unzip -q "${{ steps.z.outputs.zip }}" -d _src
-
-      - name: Locate Gradle project root
-        id: r
-        run: |
-          set -e
-          cd _src
-          f=$(find . -maxdepth 4 \( -name settings.gradle -o -name settings.gradle.kts \) | head -n1)
-          if [ -z "$f" ]; then
-            f="settings.gradle"
-            echo "rootProject.name='app'" > "$f"
-          fi
-          root=$(dirname "$f")
-          echo "root=$root" >> $GITHUB_OUTPUT
-          echo "PROJECT_DIR=$root" >> $GITHUB_ENV
-          echo "Gradle root: $root"
-
-      - name: Patch repositories (pluginManagement + allprojects)
+- name: Patch repositories (pluginManagement + allprojects)
         run: |
           set -e
           ROOT="_src/${{ steps.r.outputs.root }}"
           FILE=""
           [ -f "$ROOT/settings.gradle" ] && FILE="$ROOT/settings.gradle"
           [ -f "$ROOT/settings.gradle.kts" ] && FILE="$ROOT/settings.gradle.kts"
-          if ! grep -q "pluginManagement" "$FILE"; then
-            cat > /tmp/pm.txt <<'EOF'
-pluginManagement {
-    repositories {
-        google()
-        mavenCentral()
-        gradlePluginPortal()
-    }
-}
-dependencyResolutionManagement {
-    repositoriesMode.set(RepositoriesMode.FAIL_ON_PROJECT_REPOS)
-    repositories {
-        google()
-        mavenCentral()
-    }
-}
-EOF
-            cat /tmp/pm.txt "$FILE" > "$FILE.new" && mv "$FILE.new" "$FILE"
-          fi
-          for F in "$ROOT/build.gradle" "$ROOT/build.gradle.kts"; do
-            if [ -f "$F" ] && ! grep -q "allprojects" "$F"; then
-              cat >>"$F" <<'EOF'
 
-allprojects {
-    repositories {
-        google()
-        mavenCentral()
-    }
-}
-EOF
+          # Вставляем pluginManagement + dependencyResolutionManagement в settings.gradle*, если их нет
+          if ! grep -q "pluginManagement" "$FILE"; then
+            printf "%s\n" \
+"pluginManagement {" \
+"    repositories {" \
+"        google()" \
+"        mavenCentral()" \
+"        gradlePluginPortal()" \
+"    }" \
+"}" \
+"" \
+"dependencyResolutionManagement {" \
+"    repositoriesMode.set(RepositoriesMode.FAIL_ON_PROJECT_REPOS)" \
+"    repositories {" \
+"        google()" \
+"        mavenCentral()" \
+"    }" \
+"}" \
+            | cat - "$FILE" > "$FILE.new" && mv "$FILE.new" "$FILE"
+          fi
+
+          # Добавляем репозитории во все сборки, если блока allprojects ещё нет
+          for F in "$ROOT/build.gradle" "$ROOT/build.gradle.kts"; do
+            if [ -f "$F" ] && ! grep -q "allprojects {" "$F"; then
+              printf "%s\n" \
+"" \
+"allprojects {" \
+"    repositories {" \
+"        google()" \
+"        mavenCentral()" \
+"    }" \
+"}" \
+              >> "$F"
             fi
           done
-
-      - name: Set up JDK 17
-        uses: actions/setup-java@v4
-        with:
-          distribution: temurin
-          java-version: 17
-
-      - name: Ensure Gradle wrapper 8.2.1
-        run: |
-          set -e
-          cd "_src/${PROJECT_DIR}"
-          if [ ! -f gradlew ]; then
-            gradle wrapper --gradle-version 8.2.1
-          fi
-          chmod +x gradlew
-
-      - name: Assemble debug (via wrapper)
-        run: |
-          set -e
-          cd "_src/${PROJECT_DIR}"
-          ./gradlew --no-daemon assembleDebug
-
-      - name: Upload APK
-        uses: actions/upload-artifact@v4
-        with:
-          name: debug-apk
-          path: |
-            _src/${{ steps.r.outputs.root }}/**/*.apk
-          if-no-files-found: error
