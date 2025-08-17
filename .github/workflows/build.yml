@@ -24,14 +24,12 @@ jobs:
         run: |
           set -e
           ZIP="LedLexusBT.zip"
-          # если файла с таким именем нет — возьмём первый .zip в корне
           if [ ! -f "$ZIP" ]; then ZIP="$(ls -1 *.zip 2>/dev/null | head -n1)"; fi
           if [ -z "$ZIP" ]; then echo "Zip not found"; exit 1; fi
           rm -rf _src
           mkdir _src
           unzip -q "$ZIP" -d _src
 
-          # ищем корень Android-проекта (где settings.gradle*)
           SETTINGS_FILE="$(find _src -maxdepth 3 -type f \( -name settings.gradle -o -name settings.gradle.kts \) | head -n1)"
           if [ -z "$SETTINGS_FILE" ]; then
             echo "settings.gradle(.kts) not found"; exit 1
@@ -78,14 +76,12 @@ jobs:
           if [ -f "${PROJECT_DIR}/settings.gradle.kts" ]; then FILE="${PROJECT_DIR}/settings.gradle.kts"; fi
           if [ -z "$FILE" ]; then echo "settings file missing"; exit 1; fi
 
-          # если в settings.* нет pluginManagement — добавим блоки в начало файла
           if ! grep -q "pluginManagement" "$FILE"; then
             tmp="$(mktemp)"
             printf "%s\n%s\n" "$SETTINGS_PATCH" "$(cat "$FILE")" > "$tmp"
             mv "$tmp" "$FILE"
           fi
 
-          # для старых проектов добавим allprojects{} в корневой build.gradle*
           for F in "${PROJECT_DIR}/build.gradle" "${PROJECT_DIR}/build.gradle.kts"; do
             if [ -f "$F" ] && ! grep -q "allprojects[[:space:]]*{" "$F"; then
               printf "\n%s\n" "$ALLPROJECTS_PATCH" >> "$F"
@@ -99,15 +95,20 @@ jobs:
           java-version: '17'
           cache: 'gradle'
 
+      # ⬇⬇⬇ Исправленный шаг — добавляем пути через $GITHUB_PATH, не трогаем PATH
       - name: Prepare Android SDK
         shell: bash
         env:
           ANDROID_SDK_ROOT: /usr/local/lib/android/sdk
           ANDROID_HOME: /usr/local/lib/android/sdk
-          PATH: /usr/local/lib/android/sdk/cmdline-tools/latest/bin:/usr/local/lib/android/sdk/platform-tools:/usr/local/lib/android/sdk/tools:$PATH
         run: |
+          set -e
+          echo "/usr/local/lib/android/sdk/cmdline-tools/latest/bin" >> "$GITHUB_PATH"
+          echo "/usr/local/lib/android/sdk/platform-tools" >> "$GITHUB_PATH"
+          echo "/usr/local/lib/android/sdk/tools" >> "$GITHUB_PATH"
+          # Устанавливаем/обновляем компоненты
           yes | sdkmanager --licenses
-          sdkmanager "platform-tools" "platforms;android-34" "build-tools;34.0.0"
+          sdkmanager --install "platform-tools" "platforms;android-34" "build-tools;34.0.0"
 
       - name: Assemble Debug APK
         working-directory: ${{ env.PROJECT_DIR }}
