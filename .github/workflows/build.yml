@@ -8,15 +8,18 @@ on:
 jobs:
   build:
     runs-on: ubuntu-latest
+    env:
+      ANDROID_SDK_ROOT: /opt/android-sdk
+      ANDROID_HOME: /opt/android-sdk
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Ensure unzip is available
+      - name: Ensure apt tools
         run: |
           sudo apt-get update
-          sudo apt-get install -y unzip
+          sudo apt-get install -y unzip curl
 
       - name: Unzip Android project
         id: unzip
@@ -24,6 +27,7 @@ jobs:
         run: |
           set -e
           ZIP="LedLexusBT.zip"
+          # если файл переименуешь — возьмём первый .zip в корне
           if [ ! -f "$ZIP" ]; then ZIP="$(ls -1 *.zip 2>/dev/null | head -n1)"; fi
           if [ -z "$ZIP" ]; then echo "Zip not found"; exit 1; fi
           rm -rf _src
@@ -36,6 +40,7 @@ jobs:
           fi
           PROJECT_DIR="$(dirname "$SETTINGS_FILE")"
           echo "PROJECT_DIR=$PROJECT_DIR" >> "$GITHUB_ENV"
+          echo "Gradle project dir: $PROJECT_DIR"
 
       - name: Make gradlew executable (if present)
         shell: bash
@@ -95,18 +100,27 @@ jobs:
           java-version: '17'
           cache: 'gradle'
 
-      # ⬇⬇⬇ Исправленный шаг — добавляем пути через $GITHUB_PATH, не трогаем PATH
-      - name: Prepare Android SDK
+      # === установка Android cmdline-tools, чтобы появился sdkmanager ===
+      - name: Install Android cmdline-tools
         shell: bash
-        env:
-          ANDROID_SDK_ROOT: /usr/local/lib/android/sdk
-          ANDROID_HOME: /usr/local/lib/android/sdk
         run: |
           set -e
-          echo "/usr/local/lib/android/sdk/cmdline-tools/latest/bin" >> "$GITHUB_PATH"
-          echo "/usr/local/lib/android/sdk/platform-tools" >> "$GITHUB_PATH"
-          echo "/usr/local/lib/android/sdk/tools" >> "$GITHUB_PATH"
-          # Устанавливаем/обновляем компоненты
+          sudo mkdir -p "$ANDROID_SDK_ROOT"
+          sudo chown -R "$USER":"$USER" "$ANDROID_SDK_ROOT"
+          mkdir -p "$ANDROID_SDK_ROOT/cmdline-tools"
+          # Если ссылка у Google поменяется, скажи — дам новую.
+          URL="https://dl.google.com/android/repository/commandlinetools-linux-11076708_latest.zip"
+          curl -L "$URL" -o /tmp/cmdline-tools.zip
+          unzip -q /tmp/cmdline-tools.zip -d "$ANDROID_SDK_ROOT/cmdline-tools"
+          # распаковывается папка cmdline-tools/cmdline-tools
+          mv "$ANDROID_SDK_ROOT/cmdline-tools/cmdline-tools" "$ANDROID_SDK_ROOT/cmdline-tools/latest"
+          echo "$ANDROID_SDK_ROOT/cmdline-tools/latest/bin" >> "$GITHUB_PATH"
+          echo "$ANDROID_SDK_ROOT/platform-tools" >> "$GITHUB_PATH"
+
+      - name: Prepare Android SDK (licenses + packages)
+        shell: bash
+        run: |
+          set -e
           yes | sdkmanager --licenses
           sdkmanager --install "platform-tools" "platforms;android-34" "build-tools;34.0.0"
 
@@ -125,6 +139,5 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: debug-apk
-          path: |
-            ${{ env.PROJECT_DIR }}/**/*.apk
+          path: ${{ env.PROJECT_DIR }}/**/*.apk
           if-no-files-found: error
