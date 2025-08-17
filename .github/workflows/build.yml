@@ -36,16 +36,14 @@ jobs:
           mkdir -p "$DEST"
           unzip -q "$ZIP" -d "$DEST"
 
-          # Определяем корень проекта: если внутри zip одна папка — берём её
+          # Корень — если внутри zip одна папка, берём её
           ROOT="$DEST"
-          FIRST_DIR="$(find "$DEST" -mindepth 1 -maxdepth 1 -type d | head -n1 || true)"
-          if [ -n "$FIRST_DIR" ]; then
-            ROOT="$FIRST_DIR"
-          fi
+          FD="$(find "$DEST" -mindepth 1 -maxdepth 1 -type d | head -n1 || true)"
+          if [ -n "$FD" ]; then ROOT="$FD"; fi
 
           echo "root=$ROOT" >> "$GITHUB_OUTPUT"
           echo "PROJECT_DIR=$ROOT" >> "$GITHUB_ENV"
-          echo "Gradle root: $ROOT"
+          echo "Project root: $ROOT"
 
       - name: Make gradlew executable (if present)
         shell: bash
@@ -54,51 +52,106 @@ jobs:
             chmod +x "${{ steps.unzip.outputs.root }}/gradlew"
           fi
 
-      - name: Patch repositories if missing
+      - name: Prepare Gradle settings (create or patch)
         shell: bash
         run: |
           set -e
           PROJECT_DIR="${{ steps.unzip.outputs.root }}"
+
+          # Ищем settings.gradle(.kts)
           FILE=""
-          if [ -f "$PROJECT_DIR/settings.gradle" ]; then FILE="$PROJECT_DIR/settings.gradle"; fi
-          if [ -f "$PROJECT_DIR/settings.gradle.kts" ]; then FILE="$PROJECT_DIR/settings.gradle.kts"; fi
-          if [ -z "$FILE" ]; then echo "settings.gradle(.kts) not found under $PROJECT_DIR"; exit 1; fi
+          [ -f "$PROJECT_DIR/settings.gradle" ] && FILE="$PROJECT_DIR/settings.gradle"
+          [ -f "$PROJECT_DIR/settings.gradle.kts" ] && FILE="$PROJECT_DIR/settings.gradle.kts"
 
-          # Если pluginManagement отсутствует — добавим блоки репозиториев в начало settings.*
-          if ! grep -q "pluginManagement" "$FILE"; then
-            TMP="$(mktemp)"
-            cat > "$TMP" <<'EOF'
-          pluginManagement {
-            repositories {
-              google()
-              mavenCentral()
-              gradlePluginPortal()
-            }
-          }
-          dependencyResolutionManagement {
-            repositoriesMode.set(RepositoriesMode.FAIL_ON_PROJECT_REPOS)
-            repositories {
-              google()
-              mavenCentral()
-            }
-          }
-          EOF
-            cat "$TMP" "$FILE" > "$FILE.new" && mv "$FILE.new" "$FILE"
-          fi
-
-          # На всякий случай для старых проектов добавим allprojects{} в корневой build.gradle*
-          for F in "$PROJECT_DIR/build.gradle" "$PROJECT_DIR/build.gradle.kts"; do
-            if [ -f "$F" ] && ! grep -q "allprojects" "$F"; then
-              cat >>"$F" <<'EOF'
-          allprojects {
-            repositories {
-              google()
-              mavenCentral()
-            }
-          }
-          EOF
+          # Если settings.* нет — пытаемся найти модуль приложения и создаём settings.gradle
+          if [ -z "$FILE" ]; then
+            echo "settings.gradle(.kts) not found, will create…"
+            CAND="$(grep -Rsl --include=build.gradle --include=build.gradle.kts -E 'com\.android\.application' "$PROJECT_DIR" | head -n1 || true)"
+            if [ -z "$CAND" ]; then
+              echo "Android application module not found (no com.android.application)"; exit 1
             fi
-          done
+            APP_DIR="$(dirname "$CAND")"
+
+            # относительный путь от PROJECT_DIR до APP_DIR
+            REL="$(python3 - <<'PY'
+import os,sys
+project=os.environ["PROJECT_DIR"]
+app=os.environ["APP_DIR"]
+rel=os.path.relpath(app, project)
+print(rel)
+PY
+)"
+            echo "Found app module at: $APP_DIR (rel: $REL)"
+
+            FILE="$PROJECT_DIR/settings.gradle"
+            cat > "$FILE" <<'EOF'
+pluginManagement {
+  repositories {
+    google()
+    mavenCentral()
+    gradlePluginPortal()
+  }
+}
+dependencyResolutionManagement {
+  repositoriesMode.set(RepositoriesMode.FAIL_ON_PROJECT_REPOS)
+  repositories {
+    google()
+    mavenCentral()
+  }
+}
+rootProject.name = "app"
+include(":app")
+EOF
+            # Пробрасываем projectDir на реальное расположение модуля
+            echo "project(\":app\").projectDir = file(\"$REL\")" >> "$FILE"
+
+            # Минимальный корневой build.gradle (на всякий случай)
+            if [ ! -f "$PROJECT_DIR/build.gradle" ] && [ ! -f "$PROJECT_DIR/build.gradle.kts" ]; then
+              cat > "$PROJECT_DIR/build.gradle" <<'EOF'
+allprojects {
+  repositories {
+    google()
+    mavenCentral()
+  }
+}
+EOF
+            fi
+          else
+            # settings.* есть — если нет pluginManagement, добавим заголовок с репами
+            if ! grep -q "pluginManagement" "$FILE"; then
+              TMP="$(mktemp)"
+              cat > "$TMP" <<'EOF'
+pluginManagement {
+  repositories {
+    google()
+    mavenCentral()
+    gradlePluginPortal()
+  }
+}
+dependencyResolutionManagement {
+  repositoriesMode.set(RepositoriesMode.FAIL_ON_PROJECT_REPOS)
+  repositories {
+    google()
+    mavenCentral()
+  }
+}
+EOF
+              cat "$TMP" "$FILE" > "$FILE.new" && mv "$FILE.new" "$FILE"
+            fi
+            # для старых проектов — добавим allprojects{} в корневой build.gradle*
+            for F in "$PROJECT_DIR/build.gradle" "$PROJECT_DIR/build.gradle.kts"; do
+              if [ -f "$F" ] && ! grep -q "allprojects" "$F"; then
+                cat >>"$F" <<'EOF'
+allprojects {
+  repositories {
+    google()
+    mavenCentral()
+  }
+}
+EOF
+              fi
+            done
+          fi
 
       - name: Set up JDK 17
         uses: actions/setup-java@v4
@@ -123,13 +176,12 @@ jobs:
         shell: bash
         run: |
           set -e
-          TASK="assembleDebug"
           if [ -f ./gradlew ]; then
-            ./gradlew --no-daemon ${TASK} --stacktrace
+            ./gradlew --no-daemon assembleDebug -x lint -x test --stacktrace
           else
-            echo "gradlew not found; install gradle from apt"
+            echo "gradlew not found; installing gradle from apt"
             sudo apt-get update -y && sudo apt-get install -y gradle
-            gradle --no-daemon ${TASK} --stacktrace
+            gradle --no-daemon assembleDebug -x lint -x test --stacktrace
           fi
 
       - name: Upload APK artifact
