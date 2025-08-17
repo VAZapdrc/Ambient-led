@@ -1,7 +1,120 @@
-name: ping
-on: [workflow_dispatch, push]
+name: Build APK from ZIP
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [ "main" ]
+
 jobs:
-  ping:
+  build:
     runs-on: ubuntu-latest
     steps:
-      - run: echo "hi"
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Locate ZIP and unzip
+        id: unzip
+        shell: bash
+        run: |
+          set -e
+          ZIP="$(ls -1 *.zip 2>/dev/null | head -n1)"
+          if [ -z "$ZIP" ]; then
+            echo "No zip found in repository root."
+            exit 1
+          fi
+          echo "Using ZIP: $ZIP"
+          mkdir -p _src
+          unzip -q "$ZIP" -d _src
+          ROOT="_src"
+          # если в архиве одна верхняя папка — заходим в неё
+          if [ "$(find _src -mindepth 1 -maxdepth 1 -type d | wc -l)" -eq 1 ]; then
+            ROOT="$(find _src -mindepth 1 -maxdepth 1 -type d)"
+          fi
+          echo "root=$ROOT" >> "$GITHUB_OUTPUT"
+          echo "Project root: $ROOT"
+          ls -la "$ROOT" || true
+
+      - name: Ensure Gradle wrapper is executable
+        shell: bash
+        run: |
+          chmod +x "${{ steps.unzip.outputs.root }}/gradlew" || true
+
+      - name: Patch repositories if missing
+        shell: bash
+        run: |
+          set -e
+          ROOT="${{ steps.unzip.outputs.root }}"
+          FILE=""
+          if [ -f "$ROOT/settings.gradle" ]; then FILE="$ROOT/settings.gradle"; fi
+          if [ -f "$ROOT/settings.gradle.kts" ]; then FILE="$ROOT/settings.gradle.kts"; fi
+          if [ -z "$FILE" ]; then
+            echo "settings.gradle(.kts) not found under $ROOT"
+            exit 1
+          fi
+          if ! grep -q "pluginManagement" "$FILE"; then
+            TMP="$(tmpfile 2>/dev/null || mktemp)"
+            cat > "$TMP" <<'EOF'
+pluginManagement {
+    repositories {
+        google()
+        mavenCentral()
+        gradlePluginPortal()
+    }
+}
+dependencyResolutionManagement {
+    repositoriesMode.set(RepositoriesMode.FAIL_ON_PROJECT_REPOS)
+    repositories {
+        google()
+        mavenCentral()
+    }
+}
+EOF
+            cat "$TMP" "$FILE" > "$FILE.new" && mv "$FILE.new" "$FILE"
+          fi
+          for F in "$ROOT/build.gradle" "$ROOT/build.gradle.kts"; do
+            if [ -f "$F" ] && ! grep -q "allprojects {" "$F"; then
+              cat >> "$F" <<'EOF'
+
+allprojects {
+    repositories {
+        google()
+        mavenCentral()
+    }
+}
+EOF
+            fi
+          done
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+          cache: 'gradle'
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Generate Gradle wrapper if missing
+        if: ${{ hashFiles(format('{0}/gradlew', steps.unzip.outputs.root)) == '' }}
+        uses: gradle/gradle-build-action@v2
+        with:
+          build-root-directory: ${{ steps.unzip.outputs.root }}
+          arguments: wrapper
+          gradle-version: 8.7
+
+      - name: Build Debug APK
+        uses: gradle/gradle-build-action@v2
+        with:
+          build-root-directory: ${{ steps.unzip.outputs.root }}
+          arguments: assembleDebug
+          gradle-version: 8.7
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: debug-apk
+          path: |
+            ${{ steps.unzip.outputs.root }}/app/build/outputs/apk/debug/*.apk
+            ${{ steps.unzip.outputs.root }}/**/build/outputs/apk/debug/*.apk
+          if-no-files-found: warn
