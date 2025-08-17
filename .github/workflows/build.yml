@@ -3,133 +3,128 @@ name: Build APK from ZIP
 on:
   push:
     branches: [ "main" ]
-  workflow_dispatch:
+    paths:
+      - "**.zip"
+      - ".github/workflows/build.yml"
 
 jobs:
   build:
     runs-on: ubuntu-latest
-    env:
-      ANDROID_SDK_ROOT: /opt/android-sdk
-      ANDROID_HOME: /opt/android-sdk
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Ensure apt tools
+      - name: Ensure unzip is available
+        shell: bash
         run: |
           sudo apt-get update
-          sudo apt-get install -y unzip curl
+          sudo apt-get install -y unzip
 
-      - name: Unzip Android project
+      - name: Locate and unzip Android project
         id: unzip
         shell: bash
         run: |
           set -e
-          ZIP="LedLexusBT.zip"
-          if [ ! -f "$ZIP" ]; then ZIP="$(ls -1 *.zip 2>/dev/null | head -n1)"; fi
-          if [ -z "$ZIP" ]; then echo "Zip not found"; exit 1; fi
-          rm -rf _src
-          mkdir _src
-          unzip -q "$ZIP" -d _src
-
-          SETTINGS_FILE="$(find _src -maxdepth 3 -type f \( -name settings.gradle -o -name settings.gradle.kts \) | head -n1)"
-          if [ -z "$SETTINGS_FILE" ]; then echo "settings.gradle(.kts) not found"; exit 1; fi
-          PROJECT_DIR="$(dirname "$SETTINGS_FILE")"
-          echo "PROJECT_DIR=$PROJECT_DIR" >> "$GITHUB_ENV"
-          echo "Gradle project dir: $PROJECT_DIR"
+          ZIP_FILE="$(ls -1t *.zip 2>/dev/null | head -n1 || true)"
+          if [ -z "$ZIP_FILE" ]; then
+            echo "No ZIP found in repo root"; exit 1
+          fi
+          ROOT="_src"
+          rm -rf "$ROOT"
+          mkdir -p "$ROOT"
+          unzip -q "$ZIP_FILE" -d "$ROOT"
+          # если в архиве одна верхняя папка — заходим в неё
+          SUB_COUNT="$(find "$ROOT" -mindepth 1 -maxdepth 1 -type d | wc -l | xargs)"
+          if [ "$SUB_COUNT" = "1" ]; then
+            ROOT="$(find "$ROOT" -mindepth 1 -maxdepth 1 -type d | head -n1)"
+          fi
+          echo "root=$ROOT" >> "$GITHUB_OUTPUT"
+          echo "PROJECT_DIR=$ROOT" >> "$GITHUB_ENV"
+          echo "Project root: $ROOT"
 
       - name: Make gradlew executable (if present)
         shell: bash
         run: |
-          if [ -f "${PROJECT_DIR}/gradlew" ]; then
-            chmod +x "${PROJECT_DIR}/gradlew"
+          if [ -f "${{ steps.unzip.outputs.root }}/gradlew" ]; then
+            chmod +x "${{ steps.unzip.outputs.root }}/gradlew"
           fi
 
-      - name: Patch repositories in settings.* if missing
+      - name: Patch repositories if missing
         shell: bash
-        env:
-          SETTINGS_PATCH: |
-            pluginManagement {
-              repositories {
-                google()
-                mavenCentral()
-                gradlePluginPortal()
-              }
-            }
-            dependencyResolutionManagement {
-              repositoriesMode.set(RepositoriesMode.FAIL_ON_PROJECT_REPOS)
-              repositories {
-                google()
-                mavenCentral()
-              }
-            }
         run: |
           set -e
+          PROJECT_DIR="${{ steps.unzip.outputs.root }}"
           FILE=""
-          if [ -f "${PROJECT_DIR}/settings.gradle" ]; then FILE="${PROJECT_DIR}/settings.gradle"; fi
-          if [ -f "${PROJECT_DIR}/settings.gradle.kts" ]; then FILE="${PROJECT_DIR}/settings.gradle.kts"; fi
-          if [ -z "$FILE" ]; then echo "settings file missing"; exit 1; fi
+          if [ -f "$PROJECT_DIR/settings.gradle" ]; then FILE="$PROJECT_DIR/settings.gradle"; fi
+          if [ -f "$PROJECT_DIR/settings.gradle.kts" ]; then FILE="$PROJECT_DIR/settings.gradle.kts"; fi
+          if [ -z "$FILE" ]; then echo "settings.gradle(.kts) not found under $PROJECT_DIR"; exit 1; fi
 
           if ! grep -q "pluginManagement" "$FILE"; then
-            tmp="$(mktemp)"
-            printf "%s\n%s\n" "$SETTINGS_PATCH" "$(cat "$FILE")" > "$tmp"
-            mv "$tmp" "$FILE"
+            TMP="$(mktemp)"
+            cat > "$TMP" <<'EOF'
+pluginManagement {
+  repositories {
+    google()
+    mavenCentral()
+    gradlePluginPortal()
+  }
+}
+dependencyResolutionManagement {
+  repositoriesMode.set(RepositoriesMode.FAIL_ON_PROJECT_REPOS)
+  repositories {
+    google()
+    mavenCentral()
+  }
+}
+EOF
+            cat "$TMP" "$FILE" > "$FILE.new" && mv "$FILE.new" "$FILE"
           fi
+
+          # для старых проектов добавим allprojects{} в корневой build.gradle*
+          for F in "$PROJECT_DIR/build.gradle" "$PROJECT_DIR/build.gradle.kts"; do
+            if [ -f "$F" ] && ! grep -q "allprojects" "$F"; then
+              cat >>"$F" <<'EOF'
+allprojects {
+  repositories {
+    google()
+    mavenCentral()
+  }
+}
+EOF
+            fi
+          done
 
       - name: Set up JDK 17
         uses: actions/setup-java@v4
         with:
-          distribution: 'temurin'
+          distribution: temurin
           java-version: '17'
-          cache: 'gradle'
 
-      - name: Install Android cmdline-tools
+      - name: Install Android SDK (licenses + packages)
         shell: bash
         run: |
           set -e
-          sudo mkdir -p "$ANDROID_SDK_ROOT"
-          sudo chown -R "$USER":"$USER" "$ANDROID_SDK_ROOT"
-          mkdir -p "$ANDROID_SDK_ROOT/cmdline-tools"
-          URL="https://dl.google.com/android/repository/commandlinetools-linux-11076708_latest.zip"
-          curl -L "$URL" -o /tmp/cmdline-tools.zip
-          unzip -q /tmp/cmdline-tools.zip -d "$ANDROID_SDK_ROOT/cmdline-tools"
-          mv "$ANDROID_SDK_ROOT/cmdline-tools/cmdline-tools" "$ANDROID_SDK_ROOT/cmdline-tools/latest"
-          echo "$ANDROID_SDK_ROOT/cmdline-tools/latest/bin" >> "$GITHUB_PATH"
-          echo "$ANDROID_SDK_ROOT/platform-tools" >> "$GITHUB_PATH"
-
-      - name: Prepare Android SDK (licenses + packages)
-        shell: bash
-        run: |
-          set +e
-          yes | sdkmanager --licenses > /dev/null
-          true
-          set -e
-          sdkmanager --install "platform-tools" "platforms;android-34" "build-tools;34.0.0"
+          yes | sdkmanager --licenses >/dev/null
+          sdkmanager "platform-tools" "platforms;android-34" "build-tools;34.0.0" >/dev/null
 
       - name: Detect Android application module
         id: detect
         shell: bash
         run: |
           set -e
-          # ищем build.gradle(.kts) с com.android.application
+          PROJECT_DIR="${{ steps.unzip.outputs.root }}"
           CAND="$(grep -Rsl --include=build.gradle --include=build.gradle.kts -E 'com\.android\.application' "$PROJECT_DIR" || true | head -n1)"
-          # типичный модуль app — подстраховка
           if [ -z "$CAND" ] && [ -d "$PROJECT_DIR/app" ]; then
-            if [ -f "$PROJECT_DIR/app/build.gradle" ] || [ -f "$PROJECT_DIR/app/build.gradle.kts" ]; then
+            if ls "$PROJECT_DIR/app"/build.gradle* >/dev/null 2>&1; then
               CAND="$PROJECT_DIR/app/build.gradle"
             fi
           fi
           if [ -z "$CAND" ]; then
-            echo "Не нашли модуль приложения"
-            ls -R "$PROJECT_DIR"
-            exit 1
+            echo "Не нашли модуль приложения"; ls -R "$PROJECT_DIR"; exit 1
           fi
-
           APP_DIR="$(dirname "$CAND")"
           echo "APP_DIR=$APP_DIR" >> "$GITHUB_ENV"
-
-          # вычисляем имя для Gradle-задачи в формате :module:submodule (без python)
           if [ "$APP_DIR" = "$PROJECT_DIR" ]; then
             REL=""
           else
@@ -137,46 +132,45 @@ jobs:
             REL="${REL//\//:}"
           fi
           echo "GRADLE_MOD=$REL" >> "$GITHUB_ENV"
-          echo "Найден модуль: $REL в $APP_DIR"
-import os,sys
-project=os.environ["PROJECT_DIR"]
-app=os.environ["APP_DIR"]
-rel=os.path.relpath(app, project)
-print("" if rel=="." else ":" + ":".join(rel.split(os.sep)))
-PY
-)"
-          echo "GRADLE_MOD=$REL" >> "$GITHUB_ENV"
-          echo "Найден модуль: $REL в $APP_DIR"
+          echo "Найден модуль: $REL ($APP_DIR)"
 
       - name: Debug — print gradle files & tree
         shell: bash
         run: |
           set -e
+          PROJECT_DIR="${{ steps.unzip.outputs.root }}"
           echo "===== settings.* ====="
-          (ls "$PROJECT_DIR"/settings.gradle* && head -n 120 "$PROJECT_DIR"/settings.gradle*) || true
+          (ls "$PROJECT_DIR"/settings.gradle* && head -n 100 "$PROJECT_DIR"/settings.gradle*) || true
           echo "===== root build.gradle* ====="
-          (ls "$PROJECT_DIR"/build.gradle* && head -n 120 "$PROJECT_DIR"/build.gradle*) || true
+          (ls "$PROJECT_DIR"/build.gradle* && head -n 100 "$PROJECT_DIR"/build.gradle*) || true
           echo "===== app build.gradle* ====="
-          (ls "$APP_DIR"/build.gradle* && head -n 120 "$APP_DIR"/build.gradle*) || true
-          echo "===== tree (2 levels) ====="
+          (ls "$APP_DIR"/build.gradle* && head -n 100 "$APP_DIR"/build.gradle*) || true
+          echo "===== tree ====="
           (cd "$PROJECT_DIR" && find . -maxdepth 2 -type f -name "build.gradle*" | sort)
 
+      - name: Install Gradle if no wrapper
+        shell: bash
+        run: |
+          if [ ! -f "${{ steps.unzip.outputs.root }}/gradlew" ]; then
+            sudo apt-get update && sudo apt-get install -y gradle
+          fi
+
       - name: Assemble Debug APK
-        working-directory: ${{ env.PROJECT_DIR }}
+        working-directory: ${{ steps.unzip.outputs.root }}
         shell: bash
         run: |
           set -e
           TASK="assembleDebug"
-          if [ -n "${GRADLE_MOD}" ]; then TASK="${GRADLE_MOD}:assembleDebug"; fi
+          if [ -n "$GRADLE_MOD" ]; then TASK="${GRADLE_MOD#:}:assembleDebug"; fi
           if [ -f ./gradlew ]; then
-            ./gradlew --no-daemon ${TASK} --stacktrace
+            ./gradlew --no-daemon $TASK --stacktrace
           else
-            gradle --no-daemon ${TASK} --stacktrace
+            gradle --no-daemon $TASK --stacktrace
           fi
 
       - name: Upload APK artifact
         uses: actions/upload-artifact@v4
         with:
           name: debug-apk
-          path: ${{ env.PROJECT_DIR }}/**/*.apk
+          path: ${{ steps.unzip.outputs.root }}/**/*.apk
           if-no-files-found: error
