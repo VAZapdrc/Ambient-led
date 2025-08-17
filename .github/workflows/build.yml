@@ -36,10 +36,12 @@ jobs:
           mkdir -p "$DEST"
           unzip -q "$ZIP" -d "$DEST"
 
-          # Корень — если внутри zip одна папка, берём её
+          # если в архиве одна верхняя папка — считаем её корнем
           ROOT="$DEST"
-          FD="$(find "$DEST" -mindepth 1 -maxdepth 1 -type d | head -n1 || true)"
-          if [ -n "$FD" ]; then ROOT="$FD"; fi
+          ONE="$(find "$DEST" -mindepth 1 -maxdepth 1 -type d | head -n1 || true)"
+          if [ -n "$ONE" ] && [ "$(find "$DEST" -mindepth 1 -maxdepth 1 | wc -l)" -eq 1 ]; then
+            ROOT="$ONE"
+          fi
 
           echo "root=$ROOT" >> "$GITHUB_OUTPUT"
           echo "PROJECT_DIR=$ROOT" >> "$GITHUB_ENV"
@@ -58,30 +60,23 @@ jobs:
           set -e
           PROJECT_DIR="${{ steps.unzip.outputs.root }}"
 
-          # Ищем settings.gradle(.kts)
+          # settings.gradle(.kts) в корне проекта?
           FILE=""
           [ -f "$PROJECT_DIR/settings.gradle" ] && FILE="$PROJECT_DIR/settings.gradle"
           [ -f "$PROJECT_DIR/settings.gradle.kts" ] && FILE="$PROJECT_DIR/settings.gradle.kts"
 
-          # Если settings.* нет — пытаемся найти модуль приложения и создаём settings.gradle
           if [ -z "$FILE" ]; then
-            echo "settings.gradle(.kts) not found, will create…"
+            echo "settings.gradle(.kts) not found, creating…"
+            # ищем модуль приложения по плагину com.android.application
             CAND="$(grep -Rsl --include=build.gradle --include=build.gradle.kts -E 'com\.android\.application' "$PROJECT_DIR" | head -n1 || true)"
             if [ -z "$CAND" ]; then
               echo "Android application module not found (no com.android.application)"; exit 1
             fi
             APP_DIR="$(dirname "$CAND")"
 
-            # относительный путь от PROJECT_DIR до APP_DIR
-            REL="$(python3 - <<'PY'
-import os,sys
-project=os.environ["PROJECT_DIR"]
-app=os.environ["APP_DIR"]
-rel=os.path.relpath(app, project)
-print(rel)
-PY
-)"
-            echo "Found app module at: $APP_DIR (rel: $REL)"
+            # относительный путь APP_DIR от PROJECT_DIR (через однострочный python, чтобы не ломать YAML)
+            REL="$(PROJECT_DIR="$PROJECT_DIR" APP_DIR="$APP_DIR" python3 -c 'import os,sys;print(os.path.relpath(os.environ["APP_DIR"], os.environ["PROJECT_DIR"]))')"
+            echo "Found app module: $APP_DIR (rel: $REL)"
 
             FILE="$PROJECT_DIR/settings.gradle"
             cat > "$FILE" <<'EOF'
@@ -102,10 +97,10 @@ dependencyResolutionManagement {
 rootProject.name = "app"
 include(":app")
 EOF
-            # Пробрасываем projectDir на реальное расположение модуля
+            # привязываем модуль к настоящей папке
             echo "project(\":app\").projectDir = file(\"$REL\")" >> "$FILE"
 
-            # Минимальный корневой build.gradle (на всякий случай)
+            # минимальный корневой build.gradle если его нет
             if [ ! -f "$PROJECT_DIR/build.gradle" ] && [ ! -f "$PROJECT_DIR/build.gradle.kts" ]; then
               cat > "$PROJECT_DIR/build.gradle" <<'EOF'
 allprojects {
@@ -188,6 +183,5 @@ EOF
         uses: actions/upload-artifact@v4
         with:
           name: debug-apk
-          path: |
-            ${{ env.PROJECT_DIR }}/**/build/outputs/apk/**/*.apk
+          path: ${{ env.PROJECT_DIR }}/**/build/outputs/apk/**/*.apk
           if-no-files-found: error
