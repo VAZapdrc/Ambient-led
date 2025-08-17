@@ -24,20 +24,19 @@ jobs:
         run: |
           set -e
           ZIP="LedLexusBT.zip"
-          # если вдруг файл назван иначе — возьмём первый .zip в корне
+          # если файла с таким именем нет — возьмём первый .zip в корне
           if [ ! -f "$ZIP" ]; then ZIP="$(ls -1 *.zip 2>/dev/null | head -n1)"; fi
           if [ -z "$ZIP" ]; then echo "Zip not found"; exit 1; fi
           rm -rf _src
           mkdir _src
           unzip -q "$ZIP" -d _src
 
-          # ищем корень проекта (где settings.gradle*):
+          # ищем корень Android-проекта (где settings.gradle*)
           SETTINGS_FILE="$(find _src -maxdepth 3 -type f \( -name settings.gradle -o -name settings.gradle.kts \) | head -n1)"
           if [ -z "$SETTINGS_FILE" ]; then
             echo "settings.gradle(.kts) not found"; exit 1
           fi
           PROJECT_DIR="$(dirname "$SETTINGS_FILE")"
-          echo "project_dir=$PROJECT_DIR" >> "$GITHUB_OUTPUT"
           echo "PROJECT_DIR=$PROJECT_DIR" >> "$GITHUB_ENV"
 
       - name: Make gradlew executable (if present)
@@ -49,48 +48,47 @@ jobs:
 
       - name: Patch repositories if missing
         shell: bash
+        env:
+          SETTINGS_PATCH: |
+            pluginManagement {
+              repositories {
+                google()
+                mavenCentral()
+                gradlePluginPortal()
+              }
+            }
+            dependencyResolutionManagement {
+              repositoriesMode.set(RepositoriesMode.FAIL_ON_PROJECT_REPOS)
+              repositories {
+                google()
+                mavenCentral()
+              }
+            }
+          ALLPROJECTS_PATCH: |
+            allprojects {
+              repositories {
+                google()
+                mavenCentral()
+              }
+            }
         run: |
           set -e
-          # settings.gradle / settings.gradle.kts
           FILE=""
           if [ -f "${PROJECT_DIR}/settings.gradle" ]; then FILE="${PROJECT_DIR}/settings.gradle"; fi
           if [ -f "${PROJECT_DIR}/settings.gradle.kts" ]; then FILE="${PROJECT_DIR}/settings.gradle.kts"; fi
           if [ -z "$FILE" ]; then echo "settings file missing"; exit 1; fi
 
+          # если в settings.* нет pluginManagement — добавим блоки в начало файла
           if ! grep -q "pluginManagement" "$FILE"; then
-            TMP="$(mktemp)"
-            cat > "$TMP" << 'EOF'
-pluginManagement {
-  repositories {
-    google()
-    mavenCentral()
-    gradlePluginPortal()
-  }
-}
-dependencyResolutionManagement {
-  repositoriesMode.set(RepositoriesMode.FAIL_ON_PROJECT_REPOS)
-  repositories {
-    google()
-    mavenCentral()
-  }
-}
-EOF
-            # Вставляем блоки в начало settings.*
-            cat "$TMP" "$FILE" > "$FILE.new" && mv "$FILE.new" "$FILE"
+            tmp="$(mktemp)"
+            printf "%s\n%s\n" "$SETTINGS_PATCH" "$(cat "$FILE")" > "$tmp"
+            mv "$tmp" "$FILE"
           fi
 
-          # Старые проекты иногда требуют allprojects{} в корневом build.gradle
+          # для старых проектов добавим allprojects{} в корневой build.gradle*
           for F in "${PROJECT_DIR}/build.gradle" "${PROJECT_DIR}/build.gradle.kts"; do
-            if [ -f "$F" ] && ! grep -q "allprojects" "$F"; then
-              cat >> "$F" << 'EOF'
-
-allprojects {
-  repositories {
-    google()
-    mavenCentral()
-  }
-}
-EOF
+            if [ -f "$F" ] && ! grep -q "allprojects[[:space:]]*{" "$F"; then
+              printf "\n%s\n" "$ALLPROJECTS_PATCH" >> "$F"
             fi
           done
 
@@ -101,7 +99,6 @@ EOF
           java-version: '17'
           cache: 'gradle'
 
-      # На github-runner уже есть Android SDK. Ставим нужные пакеты и принимаем лицензии.
       - name: Prepare Android SDK
         shell: bash
         env:
@@ -110,7 +107,6 @@ EOF
           PATH: /usr/local/lib/android/sdk/cmdline-tools/latest/bin:/usr/local/lib/android/sdk/platform-tools:/usr/local/lib/android/sdk/tools:$PATH
         run: |
           yes | sdkmanager --licenses
-          # Поставим свежие платформу/билд-тулы (можно поменять версии при надобности)
           sdkmanager "platform-tools" "platforms;android-34" "build-tools;34.0.0"
 
       - name: Assemble Debug APK
