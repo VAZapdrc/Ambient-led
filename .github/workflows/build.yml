@@ -1,63 +1,86 @@
 name: Build APK from ZIP
 
 on:
-  workflow_dispatch:
   push:
     branches: [ main ]
+    paths:
+      - "*.zip"
+      - ".github/workflows/build.yml"
+  workflow_dispatch:
 
 jobs:
   build:
     runs-on: ubuntu-latest
+
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Ensure unzip
-        run: sudo apt-get update && sudo apt-get install -y unzip
-
-      - name: Unzip Android project
-        shell: bash
+      - name: Find ZIP in repo root
+        id: detect
         run: |
-          if [ ! -f LedLexusBT.zip ]; then
-            echo "LedLexusBT.zip not found in repo root"; exit 1;
+          set -e
+          ZIP=$(ls -1 *.zip 2>/dev/null | head -n1 || true)
+          if [ -z "$ZIP" ]; then
+            echo "No ZIP found in repository root." >&2
+            exit 1
           fi
-          unzip -q LedLexusBT.zip -d .
-          # найти корень проекта (где есть gradlew)
-          if [ -f gradlew ]; then
-            ROOT_DIR="$GITHUB_WORKSPACE"
-          else
-            ROOT_DIR=$(find . -maxdepth 2 -type f -name gradlew | head -n1 | xargs dirname)
+          echo "zip=$ZIP" >> $GITHUB_OUTPUT
+          echo "Using ZIP: $ZIP"
+
+      - name: Unzip
+        run: |
+          rm -rf _src
+          mkdir -p _src
+          unzip -q "${{ steps.detect.outputs.zip }}" -d _src
+
+      - name: Locate Gradle project root
+        id: locate
+        run: |
+          set -e
+          cd _src
+          FILE=$(find . -maxdepth 4 -type f \( -name settings.gradle -o -name settings.gradle.kts \) -print -quit)
+          if [ -z "$FILE" ]; then
+            echo "settings.gradle not found inside ZIP" >&2
+            ls -la
+            exit 1
           fi
-          if [ -z "$ROOT_DIR" ]; then echo "gradlew not found after unzip"; exit 1; fi
-          echo "PROJECT_DIR=$ROOT_DIR" >> $GITHUB_ENV
-          chmod +x "$ROOT_DIR/gradlew"
+          ROOT=$(dirname "$FILE")
+          echo "root=$ROOT" >> $GITHUB_OUTPUT
+          echo "PROJECT_DIR=$ROOT" >> $GITHUB_ENV
+          echo "Gradle root: $ROOT"
 
       - name: Set up JDK 17
         uses: actions/setup-java@v4
         with:
-          distribution: 'temurin'
-          java-version: '17'
-          cache: 'gradle'
+          distribution: temurin
+          java-version: 17
 
-      - name: Install Android SDK
+      - name: Install Android SDK tools
         uses: android-actions/setup-android@v3
 
       - name: Accept licenses
         run: yes | sdkmanager --licenses
 
-      - name: Install SDK packages
+      - name: Make gradlew executable (if exists)
         run: |
-          sdkmanager "platform-tools" "platforms;android-34" "build-tools;34.0.0"
+          cd _src/${PROJECT_DIR}
+          if [ -f gradlew ]; then chmod +x gradlew; fi
 
-      - name: Assemble Debug
+      - name: Assemble debug
         run: |
-          cd "$PROJECT_DIR"
-          ./gradlew --no-daemon assembleDebug
+          cd _src/${PROJECT_DIR}
+          if [ -f gradlew ]; then
+            ./gradlew --no-daemon assembleDebug
+          else
+            gradle --no-daemon assembleDebug
+          fi
 
       - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
           name: debug-apk
           path: |
-            ${{ env.PROJECT_DIR }}/app/build/outputs/apk/debug/*.apk
-            ${{ env.PROJECT_DIR }}/*/build/outputs/apk/debug/*.apk
+            _src/${{ steps.locate.outputs.root }}/app/build/outputs/apk/debug/*.apk
+            _src/${{ steps.locate.outputs.root }}/**/*.apk
+          if-no-files-found: error
