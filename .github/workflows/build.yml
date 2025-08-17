@@ -27,7 +27,6 @@ jobs:
         run: |
           set -e
           ZIP="LedLexusBT.zip"
-          # если файл переименуешь — возьмём первый .zip в корне
           if [ ! -f "$ZIP" ]; then ZIP="$(ls -1 *.zip 2>/dev/null | head -n1)"; fi
           if [ -z "$ZIP" ]; then echo "Zip not found"; exit 1; fi
           rm -rf _src
@@ -100,7 +99,6 @@ jobs:
           java-version: '17'
           cache: 'gradle'
 
-      # === установка Android cmdline-tools, чтобы появился sdkmanager ===
       - name: Install Android cmdline-tools
         shell: bash
         run: |
@@ -108,11 +106,9 @@ jobs:
           sudo mkdir -p "$ANDROID_SDK_ROOT"
           sudo chown -R "$USER":"$USER" "$ANDROID_SDK_ROOT"
           mkdir -p "$ANDROID_SDK_ROOT/cmdline-tools"
-          # Если ссылка у Google поменяется, скажи — дам новую.
           URL="https://dl.google.com/android/repository/commandlinetools-linux-11076708_latest.zip"
           curl -L "$URL" -o /tmp/cmdline-tools.zip
           unzip -q /tmp/cmdline-tools.zip -d "$ANDROID_SDK_ROOT/cmdline-tools"
-          # распаковывается папка cmdline-tools/cmdline-tools
           mv "$ANDROID_SDK_ROOT/cmdline-tools/cmdline-tools" "$ANDROID_SDK_ROOT/cmdline-tools/latest"
           echo "$ANDROID_SDK_ROOT/cmdline-tools/latest/bin" >> "$GITHUB_PATH"
           echo "$ANDROID_SDK_ROOT/platform-tools" >> "$GITHUB_PATH"
@@ -120,8 +116,11 @@ jobs:
       - name: Prepare Android SDK (licenses + packages)
         shell: bash
         run: |
+          set +e
+          yes | sdkmanager --licenses > /dev/null
+          # Игнорируем возможный ненулевой код из-за 'broken pipe'
+          true
           set -e
-          yes | sdkmanager --licenses
           sdkmanager --install "platform-tools" "platforms;android-34" "build-tools;34.0.0"
 
       - name: Assemble Debug APK
